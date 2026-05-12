@@ -1,0 +1,108 @@
+name: Daily Digest
+
+on:
+  schedule:
+    - cron: '0 12 * * 1-5'  # Runs every weekday at 12:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  create-digest-issue:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create daily digest issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const today = new Date().toISOString().slice(0, 10);
+            const title = `Daily Digest – ${today}`;
+
+            const existing = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: 'open',
+              per_page: 100,
+            });
+
+            if (existing.some(issue => issue.title === title)) {
+              core.info(`Daily digest issue already exists: ${title}`);
+              return;
+            }
+
+            const items = existing.map(issue => {
+              const type = issue.pull_request ? 'Pull Request' : 'Issue';
+              const labels = issue.labels.map(label => label.name).sort();
+              return {
+                number: issue.number,
+                title: issue.title,
+                url: issue.html_url,
+                author: issue.user?.login || 'unknown',
+                createdAt: issue.created_at,
+                type,
+                labels: labels.length ? labels : ['No label'],
+              };
+            });
+
+            const formatDuration = createdAt => {
+              const now = new Date();
+              const opened = new Date(createdAt);
+              const diff = Math.floor((now - opened) / 1000);
+              const days = Math.floor(diff / 86400);
+              const hours = Math.floor((diff % 86400) / 3600);
+              const minutes = Math.floor((diff % 3600) / 60);
+              if (days > 0) return `${days}d ${hours}h`;
+              if (hours > 0) return `${hours}h ${minutes}m`;
+              return `${minutes}m`;
+            };
+
+            const groups = items.reduce((acc, item) => {
+              item.labels.forEach(label => {
+                if (!acc[label]) acc[label] = [];
+                acc[label].push(item);
+              });
+              return acc;
+            }, {});
+
+            const sortedLabels = Object.keys(groups).sort((a, b) => {
+              if (a === 'No label') return 1;
+              if (b === 'No label') return -1;
+              return a.localeCompare(b);
+            });
+
+            const countIssues = items.filter(item => item.type === 'Issue').length;
+            const countPRs = items.filter(item => item.type === 'Pull Request').length;
+            const totalCount = items.length;
+
+            const makeItemLine = item =>
+              `- [#${item.number}](${item.url}) ${item.title} — @${item.author} — ${formatDuration(item.createdAt)} (${item.type})`;
+
+            let body = `## Daily Digest for ${today}\n\n`;
+            body += `**Total open items:** ${totalCount}\n\n`;
+            body += `- Issues: ${countIssues}\n`;
+            body += `- Pull requests: ${countPRs}\n\n`;
+            body += `> This issue was created automatically every weekday to summarize open issues and pull requests.\n\n`;
+
+            if (totalCount === 0) {
+              body += 'No open issues or pull requests were found at the time of this digest.';
+            } else {
+              for (const label of sortedLabels) {
+                const group = groups[label];
+                body += `### ${label} (${group.length})\n\n`;
+                group.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+                body += group.map(makeItemLine).join('\n');
+                body += '\n\n';
+              }
+            }
+
+            await github.rest.issues.create({
+              owner,
+              repo,
+              title,
+              body,
+            });
